@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html>
+<!-- Import necessary libraries from Google APIs, PyScript website -->
+<head>
+  <link href='https://fonts.googleapis.com/css?family=Montserrat' rel='stylesheet'>
+  <meta charset="UTF-8">
+  <meta name="viewport"
+    content="width=device-width, user-scalable=yes, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0">
+  <meta http-equiv="X-UA-Compatible" content="ie=edge, chrome=1">
+  <script defer src="https://pyscript.net/latest/pyscript.js"></script>
+</head>
+
+<!-- Style adjustments -->
+<style> 
+    body {
+    	font-family: 'Montserrat';
+    	font-size: 20px;
+    	text-align: center;
+    	font-weight: bold;
+        color: black;
+  	}
+    
+    .container {
+      text-align: center;
+    }
+    .btn {
+    	display: inline-block;
+    	font-size: 22px;
+      padding: 0.5em 1em;
+      border: none;
+      text-align: center;
+      background: white;
+      left: 50%;
+    }
+    
+    .btn:hover {
+      color: white;
+      transition: .5s ease-out;
+    }
+
+    .pca:hover {
+      background: #18de50;
+    }
+    
+    .tsne:hover {
+      background: #223dd4;
+    }
+    .choose:hover {
+      background: white;
+      color: black;
+    }
+    
+</style>
+<body>
+  
+<!-- Only accept HDF5 file types -->
+<label for="myH5File">
+  Upload an H5 file here!
+</label>
+<input type="file" class="btn choose" accept=".h5, .hdf5" id="myH5File">
+<br><br>
+
+<!-- allow the user to choose between PCA and t-SNE -->
+<div class="container">
+  <h3> Please choose a dimensionality reduction method: </h3>
+  <button id="pca button" class="btn pca">PCA</button>
+  <button id="tsne button" class="btn tsne">T-SNE</button>
+</div>
+
+
+<!--import packages -->
+<py-config style="color: transparent; user-select: none;">
+  packages = ["pandas", "scikit-learn", "matplotlib", "anndata", "disable_warnings", "mpld3"]
+</py-config>
+
+<!-- enable download -->
+<script>
+  function createLink(dataURL, id) {
+    a = document.getElementById(id);
+    a.href = dataURL;
+  }
+</script>
+
+<!-- main Python code -->
+<py-script>
+
+# import necessary libraries
+import pandas as pd
+import js
+import io
+import base64
+import pyodide
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+import mpld3
+from sklearn.cluster import KMeans
+from sklearn.manifold import TSNE
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+import anndata as ad
+from disable_warnings import *
+
+def write_file_to_html_element(file_path, html_element_id, parent_id):
+
+  with open(file_path, "r") as f:
+    file_contents = f.read()
+
+  template = Template("""
+  <div id="{{ html_element_id }}">{{ file_contents }}</div>
+  """)
+
+  output = template.render(html_element_id=html_element_id, file_contents=file_contents)
+
+  js.document.getElementById(parent_id).outerHTML += output
+
+# Base64 encoder to enable embedding the image itself into the div
+def fig_to_base64(fig):
+  img = io.BytesIO()
+  fig.savefig(img, format='png', bbox_inches='tight')
+  img.seek(0)
+  return base64.b64encode(img.getvalue())
+
+# Process the .h5 uploaded once the file selected changes from 'No file selected'
+async def processFile(e):
+  files = e.target.files.to_py()
+  for file in files:
+    data = js.Uint8Array.new(await file.arrayBuffer())
+    df = ad.read_h5ad(io.BytesIO(bytearray(data))).to_df().round(4)
+    # PCA Graph
+    pca_col_names = df.columns.values.tolist()
+    X = StandardScaler().fit_transform(df)
+    pca = PCA(n_components = 2).fit_transform(X)
+    pca_df = pd.DataFrame(pca, columns = ["PC 1", "PC 2"])
+    pca_kmeans = KMeans(n_clusters=3, random_state=0).fit(df)
+    y_kmeans = pca_kmeans.predict(df)
+    df['kmean'] = pca_kmeans.labels_
+    pca_cleaned_df = df.reset_index().drop("index", axis=1)
+    pca_combined_df = pd.concat([pca_df, pca_cleaned_df], axis = 1)
+    fig1, ax1 = plt.subplots()
+    sc1 = ax1.scatter(pca_combined_df["PC 1"], pca_combined_df["PC 2"], c=pca_combined_df["kmean"], cmap="plasma", s=3)
+    ax1.set_title("Single-Cell Behavior (PCA Analysis)")
+    pca_custom_labels = []
+    for index1, row in pca_combined_df.iterrows():
+      custom_label = ''
+      for col1 in pca_col_names:
+        custom_label += '{column_name}: {value:.4f}\n'.format(column_name=col1, value=pca_combined_df[col1][index1])
+      pca_custom_labels += [custom_label]
+    ax1.set_xlabel("PC 1")
+    ax1.set_ylabel("PC 2")
+    tooltip1 = mpld3.plugins.PointHTMLTooltip(sc1, labels=pca_custom_labels, voffset=10, hoffset=-10)
+    mpld3.plugins.connect(fig1, tooltip1)
+    buffer1 = io.StringIO()
+    mpld3.save_html(fig1, buffer1)
+    pca_dataURL = "data:text/html,{}".format(js.encodeURIComponent(buffer1.getvalue()))
+    js.createLink(pca_dataURL, "pca interactive link")
+    pca_encoded = fig_to_base64(fig1)
+    pca_html = '<img src="data:image/png;base64,{}">'.format(pca_encoded.decode("utf-8"))
+    pcaURL = "data:image/png;base64," + pca_encoded.decode("utf-8")
+    js.createLink(pcaURL, "pca download link")
+    js.document.getElementById("pca download link").innerHTML = pca_html
+    
+    # T-SNE Graph
+    tsne = TSNE(n_components=2,init='random')
+    tsne = tsne.fit_transform(df)
+    tsne_df = pd.DataFrame(tsne, columns = ["t-SNE 1", "t-SNE 2"])
+    tsne_col_names = df.columns.values.tolist()
+    kmeans = KMeans(n_clusters=3, random_state=0).fit(df)
+    y_kmeans = kmeans.predict(df)
+    df['kmean'] = kmeans.labels_
+    tsne_cleaned_df = df.reset_index().drop("index", axis=1)
+    tsne_combined_df = pd.concat([tsne_df, tsne_cleaned_df], axis = 1)
+    fig2, ax2 = plt.subplots()
+    sc2 = ax2.scatter(tsne_combined_df["t-SNE 1"], tsne_combined_df["t-SNE 2"], c=tsne_combined_df["kmean"], cmap="brg", s=3)
+    ax2.set_title("Single-Cell Behavior (t-SNE Analysis)")
+    tsne_custom_labels = []
+    for index, row in tsne_combined_df.iterrows():
+      custom_label = ''
+      for col2 in tsne_col_names:
+        custom_label += '{column_name}: {value:.4f}\n'.format(column_name=col2, value=tsne_combined_df[col2][index])
+      tsne_custom_labels += [custom_label]
+    ax2.set_xlabel("T-SNE 1")
+    ax2.set_ylabel("T-SNE 2")
+    tooltip2 = mpld3.plugins.PointHTMLTooltip(sc2, labels=tsne_custom_labels, voffset=10, hoffset=-10)
+    mpld3.plugins.connect(fig2, tooltip2)
+    buffer2 = io.StringIO()
+    mpld3.save_html(fig2, buffer2)
+    tsne_dataURL = "data:text/html,{}".format(js.encodeURIComponent(buffer2.getvalue()))
+    js.createLink(tsne_dataURL, "tsne interactive link")
+    tsne_encoded = fig_to_base64(fig2)
+    tsne_html = '<img src="data:image/png;base64,{}">'.format(tsne_encoded.decode("utf-8"))
+    tsneURL = "data:image/png;base64," + tsne_encoded.decode("utf-8")
+    js.createLink(tsneURL, "tsne download link")
+    js.document.getElementById("tsne download link").innerHTML = tsne_html
+
+# Hide the t-SNE plot
+def PCA_change(self):
+    js.document.getElementById("comment").style.display = "inline-block"
+    js.document.getElementById("pca matplotlib").style.display = "inline-block"
+    js.document.getElementById("tsne matplotlib").style.display = "none"
+
+# Hide the PCA plot
+def TSNE_change(self):
+    js.document.getElementById("comment").style.display = "inline-block"
+    js.document.getElementById("tsne matplotlib").style.display = "inline-block"
+    js.document.getElementById("pca matplotlib").style.display = "none"
+
+# Increase user interactivity
+process_proxy = pyodide.ffi.create_proxy(processFile)
+js.document.getElementById("myH5File").addEventListener("change", process_proxy)
+PCA_proxy = pyodide.ffi.create_proxy(PCA_change)
+js.document.getElementById("pca button").addEventListener("click", PCA_proxy)
+TSNE_proxy = pyodide.ffi.create_proxy(TSNE_change)
+js.document.getElementById("tsne button").addEventListener("click", TSNE_proxy)
+</py-script>
+
+<!-- PCA static and interactive plots, show if PCA selected-->
+<div id="pca matplotlib" style="display: none;">
+    <a class="btn pca" id="pca interactive link" href="snippet.html" download="pca_interactive.html">Download an interactive rendering of PCA here!</a>
+    <br><br><br>
+    <a id="pca download link" download="pca plot.png">Click here!</a>
+</div>
+
+<!-- t-SNE static plot, show if t-SNE selected -->
+<div id="tsne matplotlib" style="display: none;">
+    <a class="btn tsne" id="tsne interactive link" href="snippet.html" download="tsne_interactive.html">Download an interactive rendering of t-SNE here!</a>
+    <br><br><br>
+    <a id="tsne download link" download="tsne plot.png"></a>
+</div>
+<p id="comment" style="display: none;">To use this viewer, either play around with the interactive plot to see your data come to life, or save the static image generated! To do this, either click on the image, or alternatively, take a screenshot!</p>
+</html>
